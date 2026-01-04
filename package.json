@@ -1,0 +1,78 @@
+{
+  "name": "typekon",
+  "displayName": "Typekon",
+  "description": "Visualize types with identicons in your code",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onLanguage:java",
+    "onLanguage:typescript",
+    "onLanguage:javascript"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "typekon.toggle",
+        "title": "Typekon: Toggle Type Icons"
+      }
+    ],
+    "configuration": {
+      "title": "Typekon",
+      "properties": {
+        "typekon.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable/disable type visualization"
+        },
+        "typekon.showInheritance": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inherited type icons"
+        },
+        "typekon.iconSize": {
+          "type": "number",
+          "default": 14,
+          "description": "Size of type icons in pixels"
+        },
+        "typekon.showOnDeclaration": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show icons on variable declarations"
+        },
+        "typekon.showOnParameters": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show icons on function parameters"
+        },
+        "typekon.showOnUsage": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show icons on variable usages (may impact performance)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+  }
+}
