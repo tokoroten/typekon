@@ -1,25 +1,27 @@
 # Typekon
 
-型をidenticonで可視化するVSCode拡張機能です。
+> **[日本語版 README はこちら](README_JP.md)**
+
+A VSCode extension that visualizes types with identicons.
 
 Type + Identicon = **Typekon**
 
-## スクリーンショット
-![スクリーンショット](images/screenshot.png)
+## Screenshot
+![Screenshot](images/screenshot.png)
 
-## 機能
+## Features
 
-- 変数の型名からユニークなアイコン（identicon）を生成
-- 型名の後ろにアイコンを表示
-- 継承関係も視覚化（親クラスのアイコンも表示）
-- LSP連携で正確な型情報を取得
-- 関数パラメータの型も表示（汎用ホバーベース検出）
-- 変数使用箇所にも型アイコンを表示（DocumentHighlights活用）
+- Generate unique icons (identicons) from type names
+- Display icons after variable names
+- Visualize inheritance chains (parent class icons)
+- Accurate type information via LSP integration
+- Function parameter type display (generic hover-based detection)
+- Variable usage site type icons (using DocumentHighlights)
 
-## 対応言語
+## Supported Languages
 
-| 言語 | 状態 | 必要条件 |
-|------|------|----------|
+| Language | Status | Requirements |
+|----------|--------|--------------|
 | TypeScript / JavaScript | ✅ | - |
 | Java | ✅ | Language Support for Java |
 | Go | ✅ | Go extension |
@@ -27,73 +29,73 @@ Type + Identicon = **Typekon**
 | Rust | ⚠️ | rust-analyzer + Cargo.toml |
 | Kotlin | ⚠️ | Kotlin Language extension |
 | C# | ⚠️ | C# Dev Kit + .csproj |
-| C / C++ | ⚠️ | C/C++ extension + プロジェクト設定 |
+| C / C++ | ⚠️ | C/C++ extension + project config |
 
-⚠️ の言語は、適切な拡張機能とプロジェクト構成が必要です。
+⚠️ Languages require appropriate extensions and project configuration.
 
-## インストール
+## Installation
 
-### 開発版をローカルで実行
+### Run development version locally
 
 ```bash
-# 依存関係をインストール
+# Install dependencies
 npm install
 
-# コンパイル
+# Compile
 npm run compile
 
-# VSCodeで開いてF5でデバッグ実行
+# Open in VSCode and press F5 to debug
 ```
 
-### VSIXパッケージを作成
+### Create VSIX package
 
 ```bash
 npm install -g @vscode/vsce
 vsce package
 ```
 
-## 設定
+## Settings
 
-| 設定 | 説明 | デフォルト |
-|------|------|------------|
-| `typekon.enabled` | 機能のON/OFF | `true` |
-| `typekon.showInheritance` | 継承アイコンを表示 | `true` |
-| `typekon.iconSize` | アイコンサイズ (px) | `14` |
-| `typekon.showOnDeclaration` | 変数宣言にアイコンを表示 | `true` |
-| `typekon.showOnParameters` | 関数パラメータにアイコンを表示 | `true` |
-| `typekon.showOnUsage` | 変数使用箇所にアイコンを表示（パフォーマンス注意） | `false` |
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `typekon.enabled` | Enable/disable the extension | `true` |
+| `typekon.showInheritance` | Show inheritance icons | `true` |
+| `typekon.iconSize` | Icon size (px) | `14` |
+| `typekon.showOnDeclaration` | Show icons on variable declarations | `true` |
+| `typekon.showOnParameters` | Show icons on function parameters | `true` |
+| `typekon.showOnUsage` | Show icons on variable usage sites (performance note) | `false` |
 
-## コマンド
+## Commands
 
-- `Typekon: Toggle Type Icons` - 表示のON/OFFを切り替え
+- `Typekon: Toggle Type Icons` - Toggle icon display on/off
 
-## 仕組み
+## How It Works
 
-### アイコン生成
-1. 型名をハッシュ化（djb2アルゴリズム）
-2. ハッシュ値から5x5の対称パターンを生成
-3. ハッシュ値からHSLカラーを決定
-4. SVGとしてレンダリング
-5. VSCodeのTextEditorDecorationとして表示
+### Icon Generation
+1. Hash the type name (djb2 algorithm)
+2. Generate a 5x5 symmetric pattern from the hash
+3. Determine HSL color from the hash
+4. Render as SVG
+5. Display as VSCode TextEditorDecoration
 
-### 型情報の取得
-1. `vscode.executeDocumentSymbolProvider` でシンボル一覧を取得
-2. `vscode.executeHoverProvider` で正確な型情報を取得
-3. メソッドシグネチャからパラメータを汎用的に検出（ホバーベース）
-4. `vscode.executeDocumentHighlights` で変数の使用箇所を追跡
+### Type Information Retrieval
+1. Get symbol list via `vscode.executeDocumentSymbolProvider`
+2. Get accurate type info via `vscode.executeHoverProvider`
+3. Detect parameters generically from method signatures (hover-based)
+4. Track variable usage sites via `vscode.executeDocumentHighlights`
 
-## 今後の改善案
+## Future Improvements
 
-- [x] LSP連携でより正確な型情報を取得
-- [ ] ジェネリクスの型パラメータも表示
-- [ ] 型エラー時のハイライト
-- [ ] カスタム継承関係の設定
-- [ ] ホバー時に継承ツリーをポップアップ表示
-- [ ] 型定義へのジャンプリンク
+- [x] LSP integration for accurate type information
+- [ ] Display generic type parameters
+- [ ] Highlight type errors
+- [ ] Custom inheritance chain settings
+- [ ] Popup inheritance tree on hover
+- [ ] Jump to type definition link
 
-## コンセプトアート
-![概念図](./images/concept.png)
+## Concept Art
+![Concept](./images/concept.png)
 
-## ライセンス
+## License
 
 MIT
