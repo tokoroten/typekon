@@ -33,6 +33,17 @@ const KNOWN_INHERITANCE: Record<string, string[]> = {
   'Set': ['Object'],
   'Date': ['Object'],
   'Promise': ['Object'],
+  // C#
+  'List': ['IList', 'Object'],
+  'Dictionary': ['IDictionary', 'Object'],
+  'StringBuilder': ['Object'],
+  // Python (common types)
+  'DataFrame': ['Object'],
+  'Series': ['Object'],
+  // Rust (no inheritance, but common types)
+  'Vec': [],
+  'Option': [],
+  'Result': [],
 };
 
 export function activate(context: vscode.ExtensionContext) {
@@ -104,21 +115,29 @@ function triggerUpdateDecorations(editor: vscode.TextEditor): void {
 
 // LSP経由でシンボル情報を取得し、型を表示
 async function updateDecorationsWithLSP(editor: vscode.TextEditor): Promise<void> {
-  const supportedLanguages = ['java', 'typescript', 'javascript', 'typescriptreact', 'javascriptreact'];
-  if (!supportedLanguages.includes(editor.document.languageId)) {
+  const languageId = editor.document.languageId;
+  console.log(`Typekon: Processing file with languageId: ${languageId}`);
+
+  const supportedLanguages = [
+    'java', 'typescript', 'javascript', 'typescriptreact', 'javascriptreact',
+    'python', 'csharp', 'go', 'rust', 'kotlin', 'cpp', 'c'
+  ];
+  if (!supportedLanguages.includes(languageId)) {
+    console.log(`Typekon: Language ${languageId} not supported`);
     return;
   }
 
   try {
-    clearDecorations(editor);
-
     // ドキュメント内のシンボルを取得
     const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
       'vscode.executeDocumentSymbolProvider',
       editor.document.uri
     );
 
+    console.log(`Typekon: Got ${symbols?.length ?? 0} symbols for ${languageId}`);
+
     if (!symbols || symbols.length === 0) {
+      clearDecorations(editor);
       return;
     }
 
@@ -139,7 +158,12 @@ async function updateDecorationsWithLSP(editor: vscode.TextEditor): Promise<void
       typeGroups.get(key)!.ranges.push(range);
     }
 
-    // デコレーション適用（結合SVG identicon）
+    // 新しいデコレーションを先に準備
+    const newDecorations: {
+      decorationType: vscode.TextEditorDecorationType;
+      decorations: { range: vscode.Range; hoverMessage: string }[];
+    }[] = [];
+
     const iconSize = 14;
 
     for (const [key, { ranges, chain }] of typeGroups) {
@@ -164,6 +188,13 @@ async function updateDecorationsWithLSP(editor: vscode.TextEditor): Promise<void
         hoverMessage,
       }));
 
+      newDecorations.push({ decorationType, decorations });
+    }
+
+    // 古いデコレーションを削除してから新しいものを適用（ちらつき軽減）
+    clearDecorations(editor);
+
+    for (const { decorationType, decorations } of newDecorations) {
       editor.setDecorations(decorationType, decorations);
       activeDecorations.push(decorationType);
     }
@@ -251,8 +282,14 @@ function collectParameterSymbols(
       for (const child of symbol.children || []) {
         // TypeParameterは型パラメータなので除外
         if (child.kind === vscode.SymbolKind.Variable || child.kind === vscode.SymbolKind.Field) {
-          // 関数の範囲内で、関数名の後にある変数はパラメータの可能性が高い
-          results.push(child);
+          // 重複チェック: 既に追加済みのシンボルはスキップ
+          const isDuplicate = results.some(r =>
+            r.selectionRange.start.line === child.selectionRange.start.line &&
+            r.selectionRange.start.character === child.selectionRange.start.character
+          );
+          if (!isDuplicate) {
+            results.push(child);
+          }
         }
       }
     }
@@ -359,6 +396,119 @@ async function collectVariableUsages(
   }
 }
 
+// ホバーテキストから型名を抽出（言語別対応）
+function extractTypeFromHoverText(text: string, languageId: string): string | null {
+  // コードブロックの中身を抽出
+  const codeBlockMatch = text.match(/```\w*\n?([\s\S]*?)```/);
+  const codeText = codeBlockMatch ? codeBlockMatch[1].trim() : text;
+
+  let match: RegExpMatchArray | null = null;
+
+  switch (languageId) {
+    case 'typescript':
+    case 'javascript':
+    case 'typescriptreact':
+    case 'javascriptreact':
+      // Format: "(kind) name: Type" or "let/const name: Type" or "name: Type"
+      match = codeText.match(/\([^)]+\)\s+[\w.]+\s*:\s*([^\s=;,\n]+)/);
+      if (!match) {
+        // Handle "let name: Type" or "const name: Type" format
+        match = codeText.match(/(?:let|const|var)\s+\w+\s*:\s*([^\s=;,\n]+)/);
+      }
+      if (!match) {
+        // Generic ": Type" fallback
+        match = codeText.match(/:\s*([A-Z][a-zA-Z0-9_<>[\]|&]*)/);
+      }
+      break;
+
+    case 'java':
+      // Format: "Type name" or "Type name - context"
+      // Handle generics with commas like HashMap<String, Integer>
+      match = codeText.match(/^(.+?)\s+\w+(?:\s*-.*)?$/m);
+      break;
+
+    case 'python':
+      // Format: "(variable) name: Type" or "name: Type"
+      match = codeText.match(/\([^)]+\)\s+\w+\s*:\s*([^\s=,\n|]+)/);
+      if (!match) {
+        match = codeText.match(/:\s*([a-zA-Z_][\w[\]]*)/);
+      }
+      break;
+
+    case 'csharp':
+      // Format: "(field) Type name" or "Type name"
+      match = codeText.match(/\([^)]+\)\s+([a-zA-Z_][\w.<>[\]?]*)\s+\w+/);
+      if (!match) {
+        match = codeText.match(/^([a-zA-Z_][\w.<>[\]?]*)\s+\w+/m);
+      }
+      break;
+
+    case 'go':
+      // Format: "field Name Type // comment" or "var name Type"
+      // Handle slice/map types like []string, map[string]int
+      match = codeText.match(/(?:var|field)\s+\w+\s+(.+?)(?:\s*\/\/|$)/m);
+      break;
+
+    case 'rust':
+      // Format: "let name: Type" or "let mut name: Type" or "field name: Type"
+      match = codeText.match(/(?:let\s+(?:mut\s+)?|field\s+)\w+\s*:\s*([a-zA-Z_][\w:&<>[\]]*)/);
+      if (!match) {
+        match = codeText.match(/:\s*([a-zA-Z_][\w:&<>[\]]*)/);
+      }
+      break;
+
+    case 'kotlin':
+      // Format: "val name: Type" or "var name: Type"
+      match = codeText.match(/(?:val|var)\s+\w+\s*:\s*([a-zA-Z_][\w.<>[\]?]*)/);
+      if (!match) {
+        match = codeText.match(/:\s*([a-zA-Z_][\w.<>[\]?]*)/);
+      }
+      break;
+
+    case 'cpp':
+    case 'c':
+      // Format: "Type name" or "Type *name" or complicated template types
+      // Skip function signatures
+      if (codeText.includes('(') && codeText.includes(')')) {
+        // Could be a function, try to extract return type
+        match = codeText.match(/^([a-zA-Z_][\w:<>*&\s]*?)\s+\w+\s*\(/m);
+      }
+      if (!match) {
+        match = codeText.match(/^([a-zA-Z_][\w:<>*&]*(?:\s*[*&])?)\s+[*&]?\w+/m);
+      }
+      break;
+
+    default:
+      // Generic fallback: look for ": Type" or "Type name" patterns
+      match = codeText.match(/:\s*([a-zA-Z_][\w.<>[\]*?]*)/);
+      if (!match) {
+        match = codeText.match(/^([a-zA-Z_][\w.<>[\]]*)\s+\w+/m);
+      }
+  }
+
+  if (match && match[1]) {
+    // ジェネリクスを除去して基本型を返す
+    let typeName = match[1].trim();
+    // Remove generic parameters (complete or incomplete)
+    typeName = typeName.replace(/<.*/, '');
+    // Remove array brackets (complete or incomplete)
+    typeName = typeName.replace(/\[.*/, '');
+    // Remove pointer/reference markers
+    typeName = typeName.replace(/[*&]+$/, '').trim();
+    // Remove namespace prefixes for cleaner display (optional, keep last part)
+    const parts = typeName.split('::');
+    typeName = parts[parts.length - 1];
+    // Skip keywords
+    const keywords = ['let', 'var', 'val', 'const', 'mut', 'field', 'property', 'parameter', 'void', 'async', 'static', 'public', 'private', 'protected'];
+    if (keywords.includes(typeName.toLowerCase())) {
+      return null;
+    }
+    return typeName || null;
+  }
+
+  return null;
+}
+
 // ホバー情報から型名を抽出
 async function getTypeFromHover(
   document: vscode.TextDocument,
@@ -381,28 +531,14 @@ async function getTypeFromHover(
             text = content.value;
           }
 
-          // 型情報を抽出（言語別パターン）
-          const patterns = [
-            // TypeScript: "let foo: Type" or "(property) foo: Type"
-            /:\s*([A-Z][a-zA-Z0-9_]*)/,
-            // TypeScript コードブロック内
-            /^```typescript\n\w+\s+\w+:\s*([A-Z][a-zA-Z0-9_]*)/m,
-            // Java: "Type variableName" (先頭の型)
-            /^```java\n([A-Z][a-zA-Z0-9_]*)\s+\w+/m,
-            // Java: "(field) Type variableName" or "(variable) Type variableName"
-            /\((?:field|variable|parameter)\)\s+([A-Z][a-zA-Z0-9_<>]*)\s+\w+/,
-            // Java: 単純に "Type variableName"
-            /^([A-Z][a-zA-Z0-9_]*)\s+[a-z_]\w*\s*[=;]/m,
-            // Generic: 行頭の大文字で始まる型
-            /^([A-Z][a-zA-Z0-9_]*)/m,
-          ];
+          // デバッグ: ホバーテキストを出力
+          console.log(`Typekon [${document.languageId}] hover:`, text.substring(0, 300));
 
-          for (const pattern of patterns) {
-            const match = text.match(pattern);
-            if (match) {
-              // ジェネリクスを除去して基本型を返す
-              return match[1].replace(/<.*>/, '');
-            }
+          // 型情報を抽出（言語ごとのLSPフォーマットに対応）
+          const typeName = extractTypeFromHoverText(text, document.languageId);
+          if (typeName) {
+            console.log(`Typekon [${document.languageId}] extracted type:`, typeName);
+            return typeName;
           }
         }
       }

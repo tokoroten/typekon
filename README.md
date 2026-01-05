@@ -10,9 +10,24 @@ Type + Identicon = **Typekon**
 ## 機能
 
 - 変数の型名からユニークなアイコン（identicon）を生成
-- 型名の前にアイコンを表示
+- 型名の後ろにアイコンを表示
 - 継承関係も視覚化（親クラスのアイコンも表示）
-- Java, TypeScript, JavaScript対応
+- LSP連携で正確な型情報を取得
+
+## 対応言語
+
+| 言語 | 状態 | 必要条件 |
+|------|------|----------|
+| TypeScript / JavaScript | ✅ | - |
+| Java | ✅ | Language Support for Java |
+| Go | ✅ | Go extension |
+| Python | ✅ | Pylance |
+| Rust | ⚠️ | rust-analyzer + Cargo.toml |
+| Kotlin | ⚠️ | Kotlin Language extension |
+| C# | ⚠️ | C# Dev Kit + .csproj |
+| C / C++ | ⚠️ | C/C++ extension + プロジェクト設定 |
+
+⚠️ の言語は、適切な拡張機能とプロジェクト構成が必要です。
 
 ## インストール
 
@@ -42,6 +57,9 @@ vsce package
 | `typekon.enabled` | 機能のON/OFF | `true` |
 | `typekon.showInheritance` | 継承アイコンを表示 | `true` |
 | `typekon.iconSize` | アイコンサイズ (px) | `14` |
+| `typekon.showOnDeclaration` | 変数宣言にアイコンを表示 | `true` |
+| `typekon.showOnParameters` | 関数パラメータにアイコンを表示 | `true` |
+| `typekon.showOnUsage` | 変数使用箇所にアイコンを表示（パフォーマンス注意） | `false` |
 
 ## コマンド
 
@@ -57,11 +75,12 @@ vsce package
 
 ## 今後の改善案
 
-- [ ] LSP連携でより正確な型情報を取得
+- [x] LSP連携でより正確な型情報を取得
 - [ ] ジェネリクスの型パラメータも表示
 - [ ] 型エラー時のハイライト
 - [ ] カスタム継承関係の設定
-- [ ] パフォーマンス最適化
+- [ ] ホバー時に継承ツリーをポップアップ表示
+- [ ] 型定義へのジャンプリンク
 
 ## コンセプトアート
 ![概念図](./images/concept.png)
