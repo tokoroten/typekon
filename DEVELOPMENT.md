@@ -32,7 +32,9 @@
 ### Phase 3: LSP連携
 - [x] `vscode.executeDocumentSymbolProvider` でシンボル一覧を取得
 - [x] `vscode.executeHoverProvider` で正確な型情報を取得
-- [x] `vscode.provideDocumentSemanticTokens` で変数使用箇所を取得
+- [x] `vscode.executeDocumentHighlights` で変数使用箇所を取得
+- [x] メソッドシグネチャからパラメータを汎用検出（ホバーベース）
+- [x] Go言語専用の追加型収集（`:=`、`var`、for-range、パラメータ）
 - [ ] 動的に継承チェーンを解析（KNOWN_INHERITANCE不要に）
 - [ ] ジェネリクスの型パラメータも表示
 
@@ -67,6 +69,53 @@ npm run compile
 - `vscode.Uri.parse()` にData URIを渡すとクラッシュする
 - デコレーションは `after` で変数名の後ろに表示
 - コンパイルエラーが出たら必ず修正してから次へ
+
+---
+
+## 技術実装詳細
+
+### パラメータ検出（汎用アプローチ）
+
+多くのLanguage Server（JDT、gopls等）はパラメータをDocumentSymbolの子として返さない。
+そのため、メソッドシグネチャを解析してホバーで型を取得する汎用アプローチを使用：
+
+1. `collectMethodSymbols` でMethod/Function/Constructorシンボルを収集
+2. 各メソッドのシグネチャ行から括弧内を抽出
+3. 識別子らしきものを正規表現で検出
+4. 各識別子位置で `executeHoverProvider` を呼び出し
+5. 型が取得できた位置のみパラメータとして追加
+
+```typescript
+// 識別子らしきものを見つける
+const identifierRegex = /\b([a-zA-Z_]\w*)\b/g;
+// ホバーで型を取得（型名自体は除外）
+if (typeName && typeName !== identName) {
+  results.push({ range, typeName });
+}
+```
+
+### 使用箇所検出（DocumentHighlights）
+
+セマンティックトークンは多くのLSPでサポートされていないため、DocumentHighlightsを使用：
+
+1. 検出した宣言位置の一覧を作成
+2. 各宣言位置で `executeDocumentHighlights` を呼び出し
+3. 返されたハイライト位置 = その変数の使用箇所
+4. 宣言と同じ型名でデコレーションを追加
+
+利点:
+- 言語に依存しない汎用的なLSP API
+- 宣言と使用箇所が自動的に関連付けられる
+- 型の伝播が不要（宣言時の型をそのまま使用）
+
+### Go言語専用処理
+
+goplsはDocumentSymbolでパラメータとローカル変数を返さないため、追加処理：
+
+- `collectGoFunctionParameters`: 関数シグネチャからパラメータを抽出
+- `collectGoShortVarDeclarations`: `:=` 短縮変数宣言を検出
+- `collectGoVarDeclarations`: `var` 宣言を検出
+- for-range変数の検出: `for key, value := range ...`
 
 ---
 
@@ -298,9 +347,17 @@ Language Serverがシンボルを返さない場合、Typekonは動作しませ�
 1. デバッグコンソールで以下のログを確認：
    - `Typekon: Processing file with languageId: xxx` - 言語ID確認
    - `Typekon: Got N symbols for xxx` - シンボル数確認
+   - `Typekon Symbol: ...` - シンボル構造の詳細
    - `Typekon [xxx] hover: ...` - ホバーテキスト確認
    - `Typekon [xxx] extracted type: ...` - 抽出された型名確認
+   - `Typekon: Found N method/function symbols` - パラメータ検出対象
+   - `Typekon: Parameter 'xxx' at line N: Type` - パラメータ検出結果
+   - `Typekon: Using N declarations to find usages` - 使用箇所検出開始
+   - `Typekon: DocumentHighlights for Type at line N: M highlights` - ハイライト数
+   - `Typekon: Added N usage decorations` - 使用箇所追加数
 
 2. ホバーテキストが出力されるが `extracted type` が出ない場合、パターンが合っていない
 
 3. `Processing file` すら出ない場合、言語IDの問題またはアクティベーションの問題
+
+4. `DocumentHighlights ... 1 highlights` の場合、宣言のみで使用箇所がない

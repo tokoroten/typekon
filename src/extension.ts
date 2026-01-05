@@ -104,6 +104,7 @@ function loadConfig(): void {
   showOnDeclaration = config.get<boolean>('showOnDeclaration', true);
   showOnParameters = config.get<boolean>('showOnParameters', true);
   showOnUsage = config.get<boolean>('showOnUsage', false);
+  console.log(`Typekon config: showOnUsage=${showOnUsage}, showOnDeclaration=${showOnDeclaration}, showOnParameters=${showOnParameters}`);
 }
 
 function triggerUpdateDecorations(editor: vscode.TextEditor): void {
@@ -145,6 +146,11 @@ async function updateDecorationsWithLSP(editor: vscode.TextEditor): Promise<void
     const typeInfos: { range: vscode.Range; typeName: string }[] = [];
     await collectSymbolTypes(editor.document, symbols, typeInfos);
 
+    console.log(`Typekon: Collected ${typeInfos.length} type infos`);
+    for (const info of typeInfos) {
+      console.log(`Typekon: - ${info.typeName} at line ${info.range.start.line + 1}`);
+    }
+
     // 型ごとにグループ化
     const typeGroups = new Map<string, { ranges: vscode.Range[]; chain: string[] }>();
 
@@ -156,6 +162,11 @@ async function updateDecorationsWithLSP(editor: vscode.TextEditor): Promise<void
         typeGroups.set(key, { ranges: [], chain });
       }
       typeGroups.get(key)!.ranges.push(range);
+    }
+
+    console.log(`Typekon: Created ${typeGroups.size} type groups`);
+    for (const [key, { ranges, chain }] of typeGroups) {
+      console.log(`Typekon: - ${key}: ${ranges.length} occurrences, lines: ${ranges.map(r => r.start.line + 1).join(', ')}`);
     }
 
     // 新しいデコレーションを先に準備
@@ -184,7 +195,7 @@ async function updateDecorationsWithLSP(editor: vscode.TextEditor): Promise<void
       const hoverMessage = `Type: ${chain[0]}${chain.length > 1 ? `\nInherits: ${chain.slice(1).join(' → ')}` : ''}`;
 
       const decorations = ranges.map(range => ({
-        range: new vscode.Range(range.end, range.end),
+        range: range,  // 変数名全体をカバーしてホバーを有効に
         hoverMessage,
       }));
 
@@ -224,9 +235,15 @@ async function collectSymbolTypes(
   const targetSymbols: vscode.DocumentSymbol[] = [];
   collectTargetSymbols(symbols, targetKinds, targetSymbols);
 
+  // デバッグ: シンボル構造を出力
+  logSymbolStructure(symbols, 0);
+
   // パラメータを収集（showOnParametersがtrueの場合）
+  // 注: 多くのLSPはパラメータをDocumentSymbolの子として返さないため、
+  // メソッドシグネチャを解析してホバーで型を取得する汎用アプローチを使用
   if (showOnParameters) {
     collectParameterSymbols(symbols, targetSymbols);
+    await collectMethodParametersViaHover(document, symbols, results);
   }
 
   // 並列でホバー情報を取得
@@ -245,9 +262,413 @@ async function collectSymbolTypes(
     }
   }
 
+  // Go言語の場合、追加の型収集（goplsはパラメータとローカル変数をDocumentSymbolとして返さない）
+  if (document.languageId === 'go') {
+    await collectGoAdditionalTypes(document, symbols, results);
+  }
+
   // 変数の使用箇所を収集（showOnUsageがtrueの場合）
+  console.log(`Typekon: showOnUsage=${showOnUsage}, about to collect usages`);
   if (showOnUsage) {
     await collectVariableUsages(document, results);
+  } else {
+    console.log('Typekon: Skipping usage collection (showOnUsage is false)');
+  }
+}
+
+// Go言語専用: goplsがDocumentSymbolとして返さないパラメータとローカル変数を収集
+async function collectGoAdditionalTypes(
+  document: vscode.TextDocument,
+  _symbols: vscode.DocumentSymbol[], // 将来の拡張用に保持
+  results: { range: vscode.Range; typeName: string }[]
+): Promise<void> {
+  const text = document.getText();
+  const existingPositions = new Set(
+    results.map(r => `${r.range.start.line}:${r.range.start.character}`)
+  );
+
+  // 重複チェック用ヘルパー
+  const isDuplicate = (line: number, char: number) => {
+    return existingPositions.has(`${line}:${char}`);
+  };
+
+  const addResult = (range: vscode.Range, typeName: string) => {
+    const key = `${range.start.line}:${range.start.character}`;
+    if (!existingPositions.has(key)) {
+      existingPositions.add(key);
+      results.push({ range, typeName });
+    }
+  };
+
+  // 1. 関数パラメータを収集
+  if (showOnParameters) {
+    await collectGoFunctionParameters(document, text, isDuplicate, addResult);
+  }
+
+  // 2. := 宣言を収集
+  if (showOnDeclaration) {
+    await collectGoShortVarDeclarations(document, text, isDuplicate, addResult);
+  }
+
+  // 3. var 宣言を収集（関数内）
+  if (showOnDeclaration) {
+    await collectGoVarDeclarations(document, text, isDuplicate, addResult);
+  }
+}
+
+// Go: 関数パラメータを収集
+async function collectGoFunctionParameters(
+  document: vscode.TextDocument,
+  text: string,
+  isDuplicate: (line: number, char: number) => boolean,
+  addResult: (range: vscode.Range, typeName: string) => void
+): Promise<void> {
+  // 関数シグネチャを検出: func name(params) または func (receiver) name(params)
+  // パラメータ部分を解析
+  const funcRegex = /func\s+(?:\([^)]*\)\s*)?(\w+)\s*\(([^)]*)\)/g;
+  let match;
+
+  const paramPromises: Promise<void>[] = [];
+
+  while ((match = funcRegex.exec(text)) !== null) {
+    const paramsStr = match[2];
+    if (!paramsStr.trim()) continue;
+
+    // パラメータ文字列の開始位置を計算
+    const funcMatchStart = match.index;
+    const paramsStartInMatch = match[0].lastIndexOf('(') + 1;
+    const paramsStartOffset = funcMatchStart + paramsStartInMatch;
+
+    // Goのパラメータを解析: "a int, b int" or "a, b int" or "a int"
+    // 各パラメータの位置を特定
+    const params = parseGoParameters(paramsStr);
+
+    for (const param of params) {
+      const paramOffset = paramsStartOffset + param.offset;
+      const position = document.positionAt(paramOffset);
+
+      if (isDuplicate(position.line, position.character)) continue;
+
+      const range = new vscode.Range(
+        position,
+        position.translate(0, param.name.length)
+      );
+
+      paramPromises.push(
+        (async () => {
+          const typeName = await getTypeFromHover(document, position);
+          if (typeName) {
+            addResult(range, typeName);
+          }
+        })()
+      );
+    }
+  }
+
+  await Promise.all(paramPromises);
+}
+
+// Goパラメータ文字列を解析して各パラメータの名前と位置を返す
+function parseGoParameters(paramsStr: string): { name: string; offset: number }[] {
+  const results: { name: string; offset: number }[] = [];
+
+  // Goのパラメータ形式:
+  // "a int" -> a: int
+  // "a, b int" -> a: int, b: int (グループ化された型)
+  // "a int, b string" -> a: int, b: string
+
+  let currentOffset = 0;
+  const parts = paramsStr.split(',');
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) {
+      currentOffset += part.length + 1; // +1 for comma
+      continue;
+    }
+
+    // 先頭の空白をスキップ
+    const leadingSpaces = part.length - part.trimStart().length;
+
+    // パラメータ名を抽出（型名は後ろにある、または省略されている）
+    // "a int" -> ["a", "int"]
+    // "a" -> ["a"] (グループ化された型の一部)
+    const tokens = trimmed.split(/\s+/);
+
+    if (tokens.length >= 1) {
+      const paramName = tokens[0];
+      // 型名でないことを確認（大文字で始まる or 基本型でない）
+      if (paramName && !isGoTypeName(paramName)) {
+        results.push({
+          name: paramName,
+          offset: currentOffset + leadingSpaces
+        });
+      }
+    }
+
+    currentOffset += part.length + 1; // +1 for comma
+  }
+
+  return results;
+}
+
+// Goの型名かどうかを判定
+function isGoTypeName(name: string): boolean {
+  const goBuiltinTypes = [
+    'int', 'int8', 'int16', 'int32', 'int64',
+    'uint', 'uint8', 'uint16', 'uint32', 'uint64', 'uintptr',
+    'float32', 'float64', 'complex64', 'complex128',
+    'bool', 'string', 'byte', 'rune', 'error', 'any'
+  ];
+
+  if (goBuiltinTypes.includes(name)) return true;
+  // ポインタ型、スライス型、マップ型
+  if (name.startsWith('*') || name.startsWith('[]') || name.startsWith('map[')) return true;
+  // 大文字で始まる = エクスポートされた型
+  if (/^[A-Z]/.test(name)) return true;
+
+  return false;
+}
+
+// Go: := 短縮変数宣言を収集
+async function collectGoShortVarDeclarations(
+  document: vscode.TextDocument,
+  text: string,
+  isDuplicate: (line: number, char: number) => boolean,
+  addResult: (range: vscode.Range, typeName: string) => void
+): Promise<void> {
+  // := パターンを検出: "name :=" or "a, b :="
+  // 行ごとに処理して確実に検出
+  const lines = text.split('\n');
+  const declPromises: Promise<void>[] = [];
+
+  for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+    const line = lines[lineNum];
+
+    // for range の変数を検出: for key, value := range ... または for _, value := range ...
+    const forRangeMatch = line.match(/^\s*for\s+(\w+|_)\s*,\s*(\w+)\s*:=\s*range/);
+    if (forRangeMatch) {
+      const [, keyVar, valueVar] = forRangeMatch;
+
+      // key変数（_でない場合）
+      if (keyVar !== '_') {
+        const keyIndex = line.indexOf(keyVar, line.indexOf('for') + 3);
+        const position = new vscode.Position(lineNum, keyIndex);
+        if (!isDuplicate(lineNum, keyIndex)) {
+          const range = new vscode.Range(position, position.translate(0, keyVar.length));
+          declPromises.push(
+            (async () => {
+              const typeName = await getTypeFromHover(document, position);
+              if (typeName) {
+                console.log(`Typekon Go: for-range key '${keyVar}' line ${lineNum + 1}: ${typeName}`);
+                addResult(range, typeName);
+              }
+            })()
+          );
+        }
+      }
+
+      // value変数
+      const valueIndex = line.indexOf(valueVar, line.indexOf(','));
+      const valuePosition = new vscode.Position(lineNum, valueIndex);
+      if (!isDuplicate(lineNum, valueIndex)) {
+        const range = new vscode.Range(valuePosition, valuePosition.translate(0, valueVar.length));
+        declPromises.push(
+          (async () => {
+            const typeName = await getTypeFromHover(document, valuePosition);
+            if (typeName) {
+              console.log(`Typekon Go: for-range value '${valueVar}' line ${lineNum + 1}: ${typeName}`);
+              addResult(range, typeName);
+            }
+          })()
+        );
+      }
+      continue; // for-rangeはこれで処理済み
+    }
+
+    // 通常の := 宣言を検出（行の任意の位置）
+    // 例: result := a + b, entry := fmt.Sprintf(...)
+    const shortDeclRegex = /\b(\w+(?:\s*,\s*\w+)*)\s*:=/g;
+    let match;
+
+    while ((match = shortDeclRegex.exec(line)) !== null) {
+      const varsStr = match[1];
+      const matchIndex = match.index;
+
+      // カンマで分割して各変数を処理
+      const vars = varsStr.split(',');
+      let charOffset = matchIndex;
+
+      for (const varPart of vars) {
+        const trimmed = varPart.trim();
+        if (!trimmed || !isValidGoIdentifier(trimmed)) {
+          charOffset += varPart.length + 1;
+          continue;
+        }
+
+        // 変数の実際の位置を計算
+        const leadingSpaces = varPart.length - varPart.trimStart().length;
+        const varCharPos = charOffset + leadingSpaces;
+        const position = new vscode.Position(lineNum, varCharPos);
+
+        if (!isDuplicate(lineNum, varCharPos)) {
+          const range = new vscode.Range(position, position.translate(0, trimmed.length));
+
+          declPromises.push(
+            (async () => {
+              const typeName = await getTypeFromHover(document, position);
+              if (typeName) {
+                console.log(`Typekon Go: := decl '${trimmed}' line ${lineNum + 1}: ${typeName}`);
+                addResult(range, typeName);
+              }
+            })()
+          );
+        }
+
+        charOffset += varPart.length + 1;
+      }
+    }
+  }
+
+  await Promise.all(declPromises);
+}
+
+// Go: var 宣言を収集（関数内のローカル変数）
+async function collectGoVarDeclarations(
+  document: vscode.TextDocument,
+  text: string,
+  isDuplicate: (line: number, char: number) => boolean,
+  addResult: (range: vscode.Range, typeName: string) => void
+): Promise<void> {
+  // var name Type または var name = value パターン
+  const varDeclRegex = /\bvar\s+(\w+)\s+/g;
+  let match;
+
+  const declPromises: Promise<void>[] = [];
+
+  while ((match = varDeclRegex.exec(text)) !== null) {
+    const varName = match[1];
+    const varOffset = match.index + match[0].indexOf(varName);
+    const position = document.positionAt(varOffset);
+
+    if (isDuplicate(position.line, position.character)) continue;
+
+    const range = new vscode.Range(
+      position,
+      position.translate(0, varName.length)
+    );
+
+    declPromises.push(
+      (async () => {
+        const typeName = await getTypeFromHover(document, position);
+        if (typeName) {
+          addResult(range, typeName);
+        }
+      })()
+    );
+  }
+
+  await Promise.all(declPromises);
+}
+
+// 有効なGo識別子かどうか
+function isValidGoIdentifier(name: string): boolean {
+  return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
+}
+
+// 汎用: メソッド/関数シグネチャからパラメータを検出（ホバーで型を取得）
+async function collectMethodParametersViaHover(
+  document: vscode.TextDocument,
+  symbols: vscode.DocumentSymbol[],
+  results: { range: vscode.Range; typeName: string }[]
+): Promise<void> {
+  const existingPositions = new Set(
+    results.map(r => `${r.range.start.line}:${r.range.start.character}`)
+  );
+
+  const methodSymbols: vscode.DocumentSymbol[] = [];
+  collectMethodSymbols(symbols, methodSymbols);
+
+  console.log(`Typekon: Found ${methodSymbols.length} method/function symbols for parameter detection`);
+
+  const paramPromises: Promise<void>[] = [];
+
+  for (const method of methodSymbols) {
+    // メソッドの開始行（シグネチャ行）を取得
+    const lineNum = method.selectionRange.start.line;
+    const line = document.lineAt(lineNum);
+    const text = line.text;
+
+    // 括弧内のパラメータ部分を見つける
+    const parenOpenIdx = text.indexOf('(');
+    const parenCloseIdx = text.lastIndexOf(')');
+    if (parenOpenIdx === -1 || parenCloseIdx === -1 || parenCloseIdx <= parenOpenIdx) {
+      continue;
+    }
+
+    const paramsStr = text.substring(parenOpenIdx + 1, parenCloseIdx);
+    if (!paramsStr.trim()) continue;
+
+    // 識別子らしきものを見つける（単語境界で区切られた英数字）
+    const identifierRegex = /\b([a-zA-Z_]\w*)\b/g;
+    let match;
+
+    while ((match = identifierRegex.exec(paramsStr)) !== null) {
+      const identName = match[1];
+      const charPos = parenOpenIdx + 1 + match.index;
+      const position = new vscode.Position(lineNum, charPos);
+      const key = `${lineNum}:${charPos}`;
+
+      if (existingPositions.has(key)) continue;
+
+      paramPromises.push(
+        (async () => {
+          const typeName = await getTypeFromHover(document, position);
+          if (typeName && typeName !== identName) {
+            // 型名と識別子名が異なる場合のみ追加（型名自体は除外）
+            const range = new vscode.Range(position, position.translate(0, identName.length));
+            const resultKey = `${range.start.line}:${range.start.character}`;
+            if (!existingPositions.has(resultKey)) {
+              existingPositions.add(resultKey);
+              results.push({ range, typeName });
+              console.log(`Typekon: Parameter '${identName}' at line ${lineNum + 1}: ${typeName}`);
+            }
+          }
+        })()
+      );
+    }
+  }
+
+  await Promise.all(paramPromises);
+}
+
+// メソッド/関数シンボルを再帰的に収集
+function collectMethodSymbols(
+  symbols: vscode.DocumentSymbol[],
+  results: vscode.DocumentSymbol[]
+): void {
+  for (const symbol of symbols) {
+    if (
+      symbol.kind === vscode.SymbolKind.Method ||
+      symbol.kind === vscode.SymbolKind.Function ||
+      symbol.kind === vscode.SymbolKind.Constructor
+    ) {
+      results.push(symbol);
+    }
+    if (symbol.children && symbol.children.length > 0) {
+      collectMethodSymbols(symbol.children, results);
+    }
+  }
+}
+
+// デバッグ: シンボル構造をログ出力
+function logSymbolStructure(symbols: vscode.DocumentSymbol[], depth: number): void {
+  const indent = '  '.repeat(depth);
+  for (const symbol of symbols) {
+    console.log(`Typekon Symbol: ${indent}${vscode.SymbolKind[symbol.kind]} "${symbol.name}" at line ${symbol.selectionRange.start.line + 1}`);
+    if (symbol.children && symbol.children.length > 0) {
+      logSymbolStructure(symbol.children, depth + 1);
+    }
   }
 }
 
@@ -299,100 +720,63 @@ function collectParameterSymbols(
   }
 }
 
-// Semantic Tokensを使って変数の使用箇所を収集
+// DocumentHighlightsを使って変数の使用箇所を収集
 async function collectVariableUsages(
   document: vscode.TextDocument,
   results: { range: vscode.Range; typeName: string }[]
 ): Promise<void> {
   try {
-    // Semantic Tokens APIを使って変数の使用箇所を取得
-    const semanticTokens = await vscode.commands.executeCommand<vscode.SemanticTokens>(
-      'vscode.provideDocumentSemanticTokens',
-      document.uri
-    );
+    console.log(`Typekon: collectVariableUsages called for ${document.languageId}`);
 
-    if (!semanticTokens) {
-      return;
+    // 宣言位置と型名のマップを作成
+    const declarations = new Map<string, { range: vscode.Range; typeName: string }>();
+    for (const result of results) {
+      const key = `${result.range.start.line}:${result.range.start.character}`;
+      declarations.set(key, result);
     }
 
-    // トークンの凡例を取得
-    const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend>(
-      'vscode.provideDocumentSemanticTokensLegend',
-      document.uri
+    console.log(`Typekon: Using ${declarations.size} declarations to find usages`);
+
+    // 各宣言位置からDocumentHighlightsを取得
+    const usagePromises: Promise<void>[] = [];
+    const existingPositions = new Set(
+      results.map(r => `${r.range.start.line}:${r.range.start.character}`)
     );
 
-    if (!legend) {
-      return;
-    }
-
-    // 変数・パラメータのトークンタイプを特定
-    const variableTokenTypes = new Set<number>();
-    legend.tokenTypes.forEach((type, index) => {
-      if (type === 'variable' || type === 'parameter' || type === 'property') {
-        variableTokenTypes.add(index);
-      }
-    });
-
-    // トークンデータをデコード
-    const data = semanticTokens.data;
-    let line = 0;
-    let char = 0;
-
-    // 並列処理用のプロミス配列
-    const usagePromises: Promise<{ range: vscode.Range; typeName: string } | null>[] = [];
-
-    for (let i = 0; i < data.length; i += 5) {
-      const deltaLine = data[i];
-      const deltaChar = data[i + 1];
-      const length = data[i + 2];
-      const tokenType = data[i + 3];
-      // const tokenModifiers = data[i + 4]; // 未使用
-
-      if (deltaLine > 0) {
-        line += deltaLine;
-        char = deltaChar;
-      } else {
-        char += deltaChar;
-      }
-
-      // 変数・パラメータのトークンのみ処理
-      if (variableTokenTypes.has(tokenType)) {
-        const position = new vscode.Position(line, char);
-        const range = new vscode.Range(position, new vscode.Position(line, char + length));
-
-        // 重複チェック（既に宣言で収集済みの場合はスキップ）
-        const isDuplicate = results.some(r =>
-          r.range.start.line === range.start.line &&
-          r.range.start.character === range.start.character
-        );
-
-        if (!isDuplicate) {
-          usagePromises.push(
-            (async () => {
-              const typeName = await getTypeFromHover(document, position);
-              if (typeName) {
-                return { range, typeName };
-              }
-              return null;
-            })()
+    for (const [, decl] of declarations) {
+      usagePromises.push(
+        (async () => {
+          const highlights = await vscode.commands.executeCommand<vscode.DocumentHighlight[]>(
+            'vscode.executeDocumentHighlights',
+            document.uri,
+            decl.range.start
           );
-        }
-      }
+
+          console.log(`Typekon: DocumentHighlights for ${decl.typeName} at line ${decl.range.start.line + 1}: ${highlights?.length ?? 0} highlights`);
+
+          if (highlights && highlights.length > 0) {
+            for (const highlight of highlights) {
+              const key = `${highlight.range.start.line}:${highlight.range.start.character}`;
+              // 重複チェック（宣言位置を含む既存のものはスキップ）
+              if (!existingPositions.has(key)) {
+                existingPositions.add(key);
+                results.push({
+                  range: highlight.range,
+                  typeName: decl.typeName
+                });
+              }
+            }
+          }
+        })()
+      );
     }
 
-    // 並列で型情報を取得（バッチ処理でパフォーマンス向上）
-    const batchSize = 20;
-    for (let i = 0; i < usagePromises.length; i += batchSize) {
-      const batch = usagePromises.slice(i, i + batchSize);
-      const batchResults = await Promise.all(batch);
-      for (const result of batchResults) {
-        if (result) {
-          results.push(result);
-        }
-      }
-    }
+    await Promise.all(usagePromises);
+
+    const addedCount = results.length - declarations.size;
+    console.log(`Typekon: Added ${addedCount} usage decorations via DocumentHighlights`);
   } catch (error) {
-    console.error('Typekon semantic tokens error:', error);
+    console.error('Typekon DocumentHighlights error:', error);
   }
 }
 
@@ -489,10 +873,24 @@ function extractTypeFromHoverText(text: string, languageId: string): string | nu
   if (match && match[1]) {
     // ジェネリクスを除去して基本型を返す
     let typeName = match[1].trim();
+
+    // Go のスライス型を処理 ([]string -> string)
+    if (typeName.startsWith('[]')) {
+      typeName = typeName.substring(2);
+    }
+    // Go の map 型を処理 (map[string]int -> map)
+    if (typeName.startsWith('map[')) {
+      typeName = 'map';
+    }
+    // Go のポインタ型を処理 (*Type -> Type)
+    if (typeName.startsWith('*')) {
+      typeName = typeName.substring(1);
+    }
+
     // Remove generic parameters (complete or incomplete)
     typeName = typeName.replace(/<.*/, '');
-    // Remove array brackets (complete or incomplete)
-    typeName = typeName.replace(/\[.*/, '');
+    // Remove array brackets at the end (Java/C# style: String[] -> String)
+    typeName = typeName.replace(/\[.*$/, '');
     // Remove pointer/reference markers
     typeName = typeName.replace(/[*&]+$/, '').trim();
     // Remove namespace prefixes for cleaner display (optional, keep last part)

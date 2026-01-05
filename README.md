@@ -13,6 +13,8 @@ Type + Identicon = **Typekon**
 - 型名の後ろにアイコンを表示
 - 継承関係も視覚化（親クラスのアイコンも表示）
 - LSP連携で正確な型情報を取得
+- 関数パラメータの型も表示（汎用ホバーベース検出）
+- 変数使用箇所にも型アイコンを表示（DocumentHighlights活用）
 
 ## 対応言語
 
@@ -67,11 +69,18 @@ vsce package
 
 ## 仕組み
 
+### アイコン生成
 1. 型名をハッシュ化（djb2アルゴリズム）
 2. ハッシュ値から5x5の対称パターンを生成
 3. ハッシュ値からHSLカラーを決定
 4. SVGとしてレンダリング
 5. VSCodeのTextEditorDecorationとして表示
+
+### 型情報の取得
+1. `vscode.executeDocumentSymbolProvider` でシンボル一覧を取得
+2. `vscode.executeHoverProvider` で正確な型情報を取得
+3. メソッドシグネチャからパラメータを汎用的に検出（ホバーベース）
+4. `vscode.executeDocumentHighlights` で変数の使用箇所を追跡
 
 ## 今後の改善案
 
